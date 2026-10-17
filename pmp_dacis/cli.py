@@ -15,14 +15,17 @@ def main(argv=None):
     ap.add_argument("--data", default="data")
     ap.add_argument("--cache", default="cache")
     ap.add_argument("--out", default="results")
-    ap.add_argument("--variants", default="plantvillage,eurosat13,eurosat3")
+    ap.add_argument("--variants", default="resisc45,eurosat13,eurosat3,plantvillage")
     ap.add_argument("--tiers", default="1,2,3")
     ap.add_argument("--seeds", default=None)
+    ap.add_argument("--m-lr", default=None, help="episodic learning rate, or 'auto' to tune it on validation classes")
     ap.add_argument("--download", action="store_true")
     a = ap.parse_args(argv)
     cfg = dict(E.PROFILES[a.profile])
     if a.seeds:
         cfg["seeds"] = [int(s) for s in a.seeds.split(",")]
+    if a.m_lr:
+        cfg["m_lr"] = "auto" if a.m_lr == "auto" else float(a.m_lr)
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if dev.type == "cuda":
         torch.backends.cudnn.benchmark = False  # autotuning every pruned shape costs more than it saves

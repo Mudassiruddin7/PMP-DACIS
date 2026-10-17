@@ -69,7 +69,7 @@ def host_info(device):
                     break
     except Exception:
         info["cpu"] = platform.processor()
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and torch.cuda.device_count() > 0:
         p = torch.cuda.get_device_properties(0)
         info["gpu"] = p.name
         info["gpu_mem_gb"] = round(p.total_memory / 2**30, 1)

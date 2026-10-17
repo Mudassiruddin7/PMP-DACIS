@@ -169,14 +169,20 @@ class CompactNet(nn.Module):
     """Off-the-shelf small ImageNet network (torchvision) used as a baseline: trunk features, global average pool,
     cosine-prototype evaluation like everything else. It has no prunable blocks."""
 
-    def __init__(self, arch):
+    def __init__(self, arch, in_ch=3):
         super().__init__()
         import torchvision
         weights = torchvision.models.get_model_weights(arch).IMAGENET1K_V1
         tv = getattr(torchvision.models, arch)(weights=weights)
         self.body = tv.features
         self.feat_dim = {"mobilenet_v3_small": 576, "mobilenet_v2": 1280, "efficientnet_b0": 1280}[arch]
-        self.in_ch = 3
+        self.in_ch = in_ch
+        if in_ch != 3:  # same recipe as the ResNet: repeat the RGB filters over the bands and scale by 3/in_ch
+            old = self.body[0][0]
+            new = nn.Conv2d(in_ch, old.out_channels, old.kernel_size, old.stride, old.padding, bias=old.bias is not None)
+            with torch.no_grad():
+                new.weight.copy_(torch.stack([old.weight[:, i % 3] for i in range(in_ch)], 1) * (3.0 / in_ch))
+            self.body[0][0] = new
         self.fc = None
         self.log_tau = nn.Parameter(torch.tensor(2.302585))
 
@@ -195,5 +201,5 @@ class CompactNet(nn.Module):
         return []
 
 
-def make_compact(arch):
-    return CompactNet(arch)
+def make_compact(arch, in_ch=3):
+    return CompactNet(arch, in_ch)

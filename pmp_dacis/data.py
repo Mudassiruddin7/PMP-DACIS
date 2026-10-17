@@ -15,6 +15,7 @@ HF_SOURCES = {
     "plantvillage": "BrandonFors/Plant-Diseases-PlantVillage-Dataset",
     "plantdoc": "Project-AgML/plant_doc_classification",
     "eurosat_msi": "blanchon/EuroSAT_MSI",
+    "resisc45": "jonathan-roberts1/NWPU-RESISC45",
 }
 # Band order of the Hugging Face parquet (checked from per-band means: index 8 is the water-vapour band B09,
 # index 9 the cirrus band B10 with near-zero reflectance, index 12 the narrow NIR band B8A).
@@ -22,7 +23,7 @@ ES_BAND_NAMES = ["B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B09", 
 ES_RGB = [3, 2, 1]   # B04 (red), B03 (green), B02 (blue)
 
 
-def download(root, names=("plantvillage", "plantdoc", "eurosat_msi")):
+def download(root, names=("plantvillage", "plantdoc", "eurosat_msi", "resisc45")):
     from huggingface_hub import snapshot_download
     for n in names:
         d = os.path.join(root, n)
@@ -36,7 +37,7 @@ def ensure_data(root, cache_dir, cfg, keep_parquet=False):
     removes the raw parquet files afterwards (set keep_parquet=True to keep them)."""
     import shutil
     jobs = (("plantvillage", "plantvillage", load_plantvillage), ("plantdoc", "plantdoc", load_plantdoc),
-            ("eurosat", "eurosat_msi", None))
+            ("eurosat", "eurosat_msi", None), ("resisc45", "resisc45", None))
     for name, hf, loader in jobs:
         tag = cache_tag(name, cfg)
         if all(os.path.exists(os.path.join(cache_dir, f"{tag}_{x}")) for x in ("X.npy", "y.npy", "names.json")):
@@ -46,6 +47,8 @@ def ensure_data(root, cache_dir, cfg, keep_parquet=False):
             load_plantvillage(root, cache_dir, cfg["pv_res"], cfg.get("limit"))
         elif name == "plantdoc":
             load_plantdoc(root, cache_dir, cfg["pv_res"], cfg.get("limit"))
+        elif name == "resisc45":
+            load_resisc45(root, cache_dir, cfg["rs_res"], cfg.get("limit"))
         else:
             load_eurosat(root, cache_dir, cfg.get("limit"))
         if not keep_parquet:
@@ -123,7 +126,8 @@ def _cached(cache_dir, tag, builder):
 
 def cache_tag(name, cfg):
     lim = f"_lim{cfg['limit']}" if cfg.get("limit") else ""
-    return {"plantvillage": f"pv_{cfg['pv_res']}{lim}", "plantdoc": f"pd_{cfg['pv_res']}{lim}", "eurosat": f"es{lim}"}[name]
+    return {"plantvillage": f"pv_{cfg['pv_res']}{lim}", "plantdoc": f"pd_{cfg['pv_res']}{lim}", "eurosat": f"es{lim}",
+            "resisc45": f"rs_{cfg.get('rs_res', 128)}{lim}"}[name]
 
 
 def load_plantvillage(root, cache_dir, res=128, limit=None):
@@ -146,6 +150,30 @@ def load_plantdoc(root, cache_dir, res=128, limit=None):
 
     X, y, names = _cached(cache_dir, f"pd_{res}" + (f"_lim{limit}" if limit else ""), build)
     return DS("plantdoc", torch.from_numpy(X), torch.from_numpy(y), names, "rgb8", res)
+
+
+# The parquet file carries no class names. Label i is the i-th name below; checked against the image file names
+# inside the parquet (airplane_001.jpg ... wetland_700.jpg, 700 per class, in this order).
+RESISC45_CLASSES = [
+    "airplane", "airport", "baseball_diamond", "basketball_court", "beach", "bridge", "chaparral", "church",
+    "circular_farmland", "cloud", "commercial_area", "dense_residential", "desert", "forest", "freeway", "golf_course",
+    "ground_track_field", "harbor", "industrial_area", "intersection", "island", "lake", "meadow", "medium_residential",
+    "mobile_home_park", "mountain", "overpass", "palace", "parking_lot", "railway", "railway_station", "rectangular_farmland",
+    "river", "roundabout", "runway", "sea_ice", "ship", "snowberg", "sparse_residential", "stadium", "storage_tank",
+    "tennis_court", "terrace", "thermal_power_station", "wetland",
+]
+
+
+def load_resisc45(root, cache_dir, res=128, limit=None):
+    """NWPU-RESISC45: 31,500 aerial scenes, 45 classes, 700 per class, 256x256 RGB, resized to res x res."""
+    def build():
+        files = sorted(glob.glob(os.path.join(root, "resisc45", "data", "*.parquet")))
+        X, y = _load_rgb_parquet(files, res, crop=False, limit=limit)
+        assert int(y.max()) < len(RESISC45_CLASSES), "unexpected label in RESISC45"
+        return X, y, list(RESISC45_CLASSES)
+
+    X, y, names = _cached(cache_dir, f"rs_{res}" + (f"_lim{limit}" if limit else ""), build)
+    return DS("resisc45", torch.from_numpy(X), torch.from_numpy(y), names, "rgb8", res)
 
 
 def load_eurosat(root, cache_dir, limit=None):
@@ -256,6 +284,20 @@ def gpu_augment(x, out_res, scale=(0.6, 1.0)):
     theta[:, 1, 2] = ty
     grid = F.affine_grid(theta, (B, x.shape[1], out_res, out_res), align_corners=False)
     return F.grid_sample(x, grid, mode="bilinear", padding_mode="reflection", align_corners=False)
+
+
+def subsample(ds, n):
+    """About n images, spread evenly over the classes (at least 40 per class), so that a tiny test run can still sample
+    episodes from every class. Used by the micro profile only."""
+    y = ds.y.numpy()
+    classes = np.unique(y)
+    k = max(40, n // len(classes))
+    sel = []
+    for c in classes:
+        idx = np.where(y == c)[0]
+        sel.append(idx[:: max(1, len(idx) // k)][:k])
+    sel = torch.from_numpy(np.sort(np.concatenate(sel)))
+    return DS(ds.name, ds.X[sel], ds.y[sel], ds.class_names, ds.kind, ds.res, ds.bands)
 
 
 def class_split(n_classes, seed, n_base, n_val):

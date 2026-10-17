@@ -173,6 +173,62 @@ def test_tune_m_lr_runs_and_is_cached():
     assert E.tune_m_lr(cfg, torch.device("cpu"), {"plantvillage": ds}, out) == best      # second call reads the cache
 
 
+def test_cfg_hash_keeps_other_variants_stable():
+    """Adding the RESISC45 settings must not invalidate cached PlantVillage / EuroSAT runs."""
+    from pmp_dacis import experiments as E
+    cfg = dict(E.PROFILES["paper"])
+    other = dict(cfg, rs_s0_epochs=cfg["rs_s0_epochs"] + 1, rs_res=96)
+    for v in ("plantvillage", "eurosat13", "eurosat3"):
+        assert E.cfg_hash(cfg, variant=v) == E.cfg_hash(other, variant=v)
+        assert E.cfg_hash(cfg, E._S0_KEYS, v) == E.cfg_hash(other, E._S0_KEYS, v)
+    assert E.cfg_hash(cfg, variant="resisc45") != E.cfg_hash(other, variant="resisc45")
+
+
+def test_grids_have_unique_ids_and_known_schedules():
+    from pmp_dacis import experiments as E
+    for v in ("plantvillage", "eurosat13", "eurosat3", "resisc45"):
+        g = E.grid_for(v)
+        ids = [s["id"] for s in g]
+        assert len(ids) == len(set(ids)), v
+        for s in g:
+            E.ops_for(s["sched"], s["t"], 0.6)           # raises KeyError for an unknown schedule
+    assert any(s["id"].startswith("K_") for s in E.grid_for("resisc45"))
+
+
+def test_compact_net_takes_thirteen_bands():
+    from pmp_dacis.model import make_compact
+    for arch in ("mobilenet_v3_small", "efficientnet_b0"):
+        m = make_compact(arch, 13).eval()
+        with torch.no_grad():
+            f = m.features(torch.randn(2, 13, 64, 64))
+        assert f.shape == (2, m.feat_dim)
+        w = m.body[0][0].weight
+        assert w.shape[1] == 13 and torch.allclose(w[:, 0], w[:, 3])      # RGB filters repeated cyclically
+
+
+def test_resisc45_variant_runs_end_to_end():
+    import tempfile
+    from pmp_dacis import data as D
+    from pmp_dacis import experiments as E
+    torch.manual_seed(2)
+    K, per = 45, 20
+    y = torch.arange(K).repeat_interleave(per)
+    X = torch.randint(0, 256, (K * per, 3, 32, 32), dtype=torch.uint8)
+    X[:, 1] = (y.view(-1, 1, 1) * 5).to(torch.uint8)
+    ds = D.DS("resisc45", X, y, [str(i) for i in range(K)], "rgb8", 32)
+    cfg = dict(E.PROFILES["smoke"])
+    cfg.update(rs_res=32, rs_s0_epochs=1, rs_r_epochs=1, rs_m_episodes=4, eval_episodes=20, shots=[1, 5], query=4, bs=32,
+               calib_per_class=4, res_sweep=[32], max_specs=None, amp=False)
+    out = tempfile.mkdtemp()
+    ctx = E.Ctx("resisc45", 0, cfg, torch.device("cpu"), {"resisc45": ds}, out)
+    assert (len(ctx.base), len(ctx.val), len(ctx.novel)) == (25, 5, 15)
+    assert ctx.m_ep == 4 and ctx.e0 == 1
+    grid = {s["id"]: s for s in E.grid_for("resisc45")}
+    for sid in ("dense_ce", "A_taylor_PMP_30", "K_mobilenet_v3_small"):
+        rec = E.run_spec(ctx, dict(grid[sid], bench=False, res_sweep=False))
+        assert 0 < rec["acc"]["novel_5"]["mean"] <= 100
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

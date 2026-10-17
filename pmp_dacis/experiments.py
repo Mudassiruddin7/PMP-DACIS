@@ -24,6 +24,7 @@ PROFILES = {
         probe_episodes=200, eval_episodes=2000, shots=[1, 5, 10], query=15, way=5, bs=128,
         calib_per_class=40, tilt=0.5, k1=0.6, gamma=1.0, lambdas=(0.3, 0.2, 0.5),
         es_s0_epochs=8, es_r_epochs=2, es_m_episodes=800, es_n_base=5,
+        rs_res=128, rs_n_base=25, rs_n_val=5, rs_s0_epochs=10, rs_r_epochs=2, rs_m_episodes=1000,
         res_sweep=[64, 96, 128, 160, 224], amp=True, limit=None,
     ),
     "smoke": dict(
@@ -32,20 +33,33 @@ PROFILES = {
         probe_episodes=10, eval_episodes=50, shots=[1, 5], query=5, way=5, bs=64,
         calib_per_class=8, tilt=0.5, k1=0.6, gamma=1.0, lambdas=(0.3, 0.2, 0.5),
         es_s0_epochs=1, es_r_epochs=1, es_m_episodes=20, es_n_base=5,
+        rs_res=64, rs_n_base=25, rs_n_val=5, rs_s0_epochs=1, rs_r_epochs=1, rs_m_episodes=20,
         res_sweep=[64, 96], amp=False, limit=6000, max_specs=3,
     ),
 }
 
+# Test profile: the full grid on a few hundred images per dataset, seconds per run. It checks that every code path
+# (all variants, all specs, report, paper) runs; its numbers mean nothing.
+PROFILES["micro"] = dict(
+    PROFILES["smoke"], seeds=[0, 1], pv_res=128, es_res=64, rs_res=128, bs=32, m_lr="auto", m_lr_grid=[2.5e-4, 1e-3],
+    m_episodes=10, es_m_episodes=10, rs_m_episodes=10, probe_episodes=5, eval_episodes=30, shots=[1, 5], query=5,
+    calib_per_class=8, amp=True, limit=None, max_specs=None, subsample=1800, res_sweep=[64, 128],
+)
+
 # keys that decide what the dense S0 network looks like (its cache must not depend on later stages)
-_S0_KEYS = ("pv_res", "es_res", "n_base", "n_val", "s0_epochs", "s0_lr", "bs", "amp", "limit", "es_s0_epochs", "es_n_base")
+_S0_KEYS = ("pv_res", "es_res", "n_base", "n_val", "s0_epochs", "s0_lr", "bs", "amp", "limit", "es_s0_epochs", "es_n_base",
+            "rs_res", "rs_n_base", "rs_n_val", "rs_s0_epochs")
+_RS_KEYS = ("rs_res", "rs_n_base", "rs_n_val", "rs_s0_epochs", "rs_r_epochs", "rs_m_episodes")   # only the RESISC45 variant depends on these
 
 
 def _h(obj):
     return hashlib.md5(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:10]
 
 
-def cfg_hash(cfg, keys=None):
+def cfg_hash(cfg, keys=None, variant=None):
     keys = keys or [k for k in cfg if k not in ("seeds", "max_specs")]
+    if variant != "resisc45":                       # keeps the hashes (and cached runs) of the other variants unchanged
+        keys = [k for k in keys if k not in _RS_KEYS]
     return _h({k: cfg[k] for k in keys if k in cfg})
 
 
@@ -77,8 +91,8 @@ class Ctx:
         self.variant, self.seed, self.cfg, self.device, self.fh = variant, seed, cfg, device, fh
         self.dir = os.path.join(out_root, "runs", variant, f"seed{seed}")
         os.makedirs(self.dir, exist_ok=True)
-        self.h_all = cfg_hash(cfg)
-        self.h_s0 = cfg_hash(cfg, _S0_KEYS)
+        self.h_all = cfg_hash(cfg, variant=variant)
+        self.h_s0 = cfg_hash(cfg, _S0_KEYS, variant)
         if variant == "plantvillage":
             ds = datasets["plantvillage"]
             self.n_base = cfg["n_base"]
@@ -86,6 +100,12 @@ class Ctx:
             self.ds = ds
             self.res = cfg["pv_res"]
             self.e0, self.r_ep, self.m_ep = cfg["s0_epochs"], cfg["r_epochs"], cfg["m_episodes"]
+        elif variant == "resisc45":
+            ds = datasets["resisc45"]
+            self.split = D.class_split(len(ds.class_names), seed, cfg["rs_n_base"], cfg["rs_n_val"])
+            self.ds = ds
+            self.res = cfg["rs_res"]
+            self.e0, self.r_ep, self.m_ep = cfg["rs_s0_epochs"], cfg["rs_r_epochs"], cfg["rs_m_episodes"]
         else:
             ds = datasets["eurosat"]
             ds = ds.with_bands(D.ES_RGB) if variant == "eurosat3" else ds.with_bands(None)
@@ -166,20 +186,21 @@ class Ctx:
 
 
 # ---- tuning of the one shared knob that the first experiments showed to matter ----------------
-def tune_m_lr(cfg, device, datasets, out_root, fh=None):
+def tune_m_lr(cfg, device, datasets, out_root, fh=None, variant="plantvillage"):
     """Choose the learning rate of the episodic stage on the *validation classes* of the first seed.
 
-    Only the dense network is used and no novel class is touched. The result is written to tuning_m_lr.json.
+    Only the dense network is used and no novel class is touched. The result is written to tuning_m_lr.json
+    (PlantVillage, the value every variant uses) or tuning_m_lr_<variant>.json (a check on another dataset).
     """
-    path = os.path.join(out_root, "tuning_m_lr.json")
-    key = cfg_hash(cfg, [k for k in cfg if k not in ("seeds", "max_specs", "m_lr")])
+    path = os.path.join(out_root, "tuning_m_lr.json" if variant == "plantvillage" else f"tuning_m_lr_{variant}.json")
+    key = cfg_hash(cfg, [k for k in cfg if k not in ("seeds", "max_specs", "m_lr")], variant)
     if os.path.exists(path):
         rec = json.load(open(path))
         if rec.get("cfg_hash") == key:
             return rec["best_lr"]
     seed = cfg["seeds"][0]
     probe_cfg = dict(cfg, m_lr=cfg["m_lr_grid"][0])
-    ctx = Ctx("plantvillage", seed, probe_cfg, device, datasets, out_root, fh)
+    ctx = Ctx(variant, seed, probe_cfg, device, datasets, out_root, fh)
     ds_e, vidx, _ = ctx.val_set
     shots = [1, 5]
 
@@ -195,10 +216,11 @@ def tune_m_lr(cfg, device, datasets, out_root, fh=None):
         t0 = time.time()
         train_episodic(m, ctx.ds, ctx.base, ctx.m_ep, lr, device, ctx._rng("tune"), way=cfg["way"], query=cfg["query"], amp=cfg["amp"])
         rows[f"{lr:g}"] = val_acc(m)
-        log(f"  [tune M lr] {lr:g}: val 1-shot {rows[f'{lr:g}']['1']:.2f}  5-shot {rows[f'{lr:g}']['5']:.2f}  ({time.time() - t0:.0f}s)", fh)
+        log(f"  [tune M lr {variant}] {lr:g}: val 1-shot {rows[f'{lr:g}']['1']:.2f}  5-shot {rows[f'{lr:g}']['5']:.2f}  ({time.time() - t0:.0f}s)", fh)
     best = max(cfg["m_lr_grid"], key=lambda lr: rows[f"{lr:g}"]["5"])
-    json.dump({"cfg_hash": key, "seed": seed, "val_classes": ctx.val, "rows": rows, "best_lr": best}, open(path, "w"), indent=1)
-    log(f"  [tune M lr] selected {best:g} (best validation 5-shot accuracy)", fh)
+    json.dump({"cfg_hash": key, "variant": variant, "seed": seed, "val_classes": ctx.val, "rows": rows, "best_lr": best},
+              open(path, "w"), indent=1)
+    log(f"  [tune M lr {variant}] best validation 5-shot accuracy at {best:g}", fh)
     return best
 
 
@@ -266,6 +288,9 @@ def _efficiency(ctx, model, spec):
     return eff
 
 
+KEEP_CKPT = ("dense_ce", "A_random_PMP_30", "A_l1_PMP_30", "A_dacis_PMP_30")
+
+
 def run_spec(ctx, spec):
     path = os.path.join(ctx.dir, f"{spec['id']}.json")
     key = _h([ctx.h_all, spec])
@@ -282,7 +307,7 @@ def run_spec(ctx, spec):
     r_epochs = spec.get("r_epochs", ctx.r_ep)
     train_s, train_img = 0.0, 0
     if spec.get("arch"):                                  # off-the-shelf compact network: S0 recipe, then R, no pruning
-        model = make_compact(spec["arch"]).to(ctx.device)
+        model = make_compact(spec["arch"], ctx.ds.in_ch).to(ctx.device)
         if ctx.dense_params is None:
             ctx.dense_params = count_params(make_model(ctx.ds.in_ch, pretrained=False))
         lg = train_ce(model, ctx.ds, ctx.base, ctx.e0, cfg["s0_lr"], ctx.device, rng, bs=cfg["bs"], amp=cfg["amp"], new_head=True)
@@ -325,8 +350,9 @@ def run_spec(ctx, spec):
            "stages": state["stages"], "train_seconds_after_s0": train_s, "train_images_after_s0": train_img,
            "wall_seconds": time.time() - t0}
     np.savez_compressed(os.path.join(ctx.dir, f"{spec['id']}.npz"), **arrs)
-    torch.save({"mids": model.mids(), "sd": model.state_dict(), "in_ch": ctx.ds.in_ch},
-               os.path.join(ctx.dir, f"ckpt_{spec['id']}.pt"))
+    if spec["id"] in KEEP_CKPT:                           # weights are not needed to rebuild any table; keep a few for inspection
+        torch.save({"mids": model.mids(), "sd": model.state_dict(), "in_ch": ctx.ds.in_ch},
+                   os.path.join(ctx.dir, f"ckpt_{spec['id']}.pt"))
     json.dump(rec, open(path, "w"))
     a5 = acc.get("novel_5", {}).get("mean", float("nan"))
     log(f"  [{ctx.variant} s{ctx.seed}] {spec['id']:<28s} params {rec['param_frac']*100:5.1f}%  novel5 {a5:5.1f}  "
@@ -356,8 +382,6 @@ def grid_for(variant):
         for t in (0.5, 0.2, 0.1):
             for c in ("l1", "dacis"):
                 L.append(_spec(f"C_{c}_PMP_{int(round(t * 100))}", "PMP", c, t, 2, bench=True))
-            for c in ("random", "taylor"):
-                L.append(_spec(f"C_{c}_PMP_{int(round(t * 100))}", "PMP", c, t, 2))
         L.append(_spec("E_dacis_PMP_30_norefine", "PMP", "dacis", 0.30, 2, refine=False))
         L.append(_spec("E_dacis_PMP_30_uniform", "PMP", "dacis", 0.30, 2, tilt=0.0))
         L.append(_spec("E_dacis_PMP_30_minmax", "PMP", "dacis", 0.30, 2, norm="minmax"))
@@ -373,7 +397,8 @@ def grid_for(variant):
             L.append(_spec(f"S_dacis_PMP_30_lam{i}", "PMP", "dacis", 0.30, 3, lambdas=lam, val_eval=True))
     else:
         for c in ["random", "l1", "taylor", "D", "dacis"]:
-            L.append(_spec(f"A_{c}_PMP_30", "PMP", c, 0.30, 1, bench=c in ("l1", "dacis"), res_sweep=False))
+            L.append(_spec(f"A_{c}_PMP_30", "PMP", c, 0.30, 1, bench=c in ("l1", "dacis"),
+                           res_sweep=variant == "resisc45" and c in ("l1", "dacis")))
         for c in ["random", "l1", "taylor", "D", "dacis"]:
             L.append(_spec(f"A2_{c}_P_30", "P", c, 0.30, 1))
         for s in ["PM", "MP", "PGP"]:
@@ -382,11 +407,15 @@ def grid_for(variant):
             L.append(_spec(f"A_{c}_PMP_30", "PMP", c, 0.30, 2))
         for t in (0.5, 0.2, 0.1):
             for c in ("l1", "dacis"):
+                L.append(_spec(f"C_{c}_PMP_{int(round(t * 100))}", "PMP", c, t, 2, bench=True))
+            for c in ("random", "taylor"):
                 L.append(_spec(f"C_{c}_PMP_{int(round(t * 100))}", "PMP", c, t, 2))
+        for arch in ("mobilenet_v3_small", "mobilenet_v2", "efficientnet_b0"):
+            L.append(_spec(f"K_{arch}", "compact", "-", 1.0, 2, arch=arch, bench=True))
     return L
 
 
-def load_datasets(data_root, cache_dir, cfg, which=("plantvillage", "plantdoc", "eurosat")):
+def load_datasets(data_root, cache_dir, cfg, which=("plantvillage", "plantdoc", "eurosat", "resisc45")):
     out = {}
     lim = cfg.get("limit")
     if "plantvillage" in which:
@@ -395,30 +424,52 @@ def load_datasets(data_root, cache_dir, cfg, which=("plantvillage", "plantdoc", 
         out["plantdoc"] = D.load_plantdoc(data_root, cache_dir, cfg["pv_res"], limit=lim)
     if "eurosat" in which:
         out["eurosat"] = D.load_eurosat(data_root, cache_dir, limit=lim)
+    if "resisc45" in which:
+        out["resisc45"] = D.load_resisc45(data_root, cache_dir, cfg["rs_res"], limit=lim)
+    if cfg.get("subsample"):                              # micro profile only; PlantDoc is already small
+        out = {k: (v if k == "plantdoc" else D.subsample(v, cfg["subsample"])) for k, v in out.items()}
     return out
 
 
-def run_all(cfg, device, data_root, cache_dir, out_root, variants=("plantvillage", "eurosat13", "eurosat3"),
+def run_all(cfg, device, data_root, cache_dir, out_root, variants=("resisc45", "eurosat13", "eurosat3", "plantvillage"),
             tiers=(1, 2, 3), fh=None):
     cfg = dict(cfg)
     which = ["plantvillage", "plantdoc"] if "plantvillage" in variants else []
     if any(v.startswith("eurosat") for v in variants):
         which.append("eurosat")
+    if "resisc45" in variants:
+        which.append("resisc45")
+    if cfg["m_lr"] == "auto" and "plantvillage" not in variants:
+        which.append("plantvillage")                      # the shared learning rate is tuned on PlantVillage validation classes
     datasets = load_datasets(data_root, cache_dir, cfg, which)
     if cfg["m_lr"] == "auto":
         cfg["m_lr"] = tune_m_lr(cfg, device, datasets, out_root, fh)
     log(f"episodic learning rate in use: {cfg['m_lr']:g}", fh)
+    if "resisc45" in variants and len(cfg.get("m_lr_grid", [])) > 1:      # same sweep on aerial-scene validation classes, for the record
+        tune_m_lr(cfg, device, datasets, out_root, fh, variant="resisc45")
+    failures = []
     for tier in tiers:
         for variant in variants:
             grid = [s for s in grid_for(variant) if s["tier"] == tier]
             if variant == "eurosat3":
-                grid = [s for s in grid if s["id"] in ("dense_ce", "dense_m", "dense_rmr", "A_l1_PMP_30", "A_dacis_PMP_30")]
+                grid = [s for s in grid if s["id"] in ("dense_ce", "dense_m", "dense_rmr", "A_l1_PMP_30", "A_dacis_PMP_30", "K_mobilenet_v3_small")]
             if cfg.get("max_specs"):                      # smoke profile: only check that the code path runs
                 grid = grid[: cfg["max_specs"]]
             for seed in cfg["seeds"]:
                 ctx = Ctx(variant, seed, cfg, device, datasets, out_root, fh)
                 ctx.dense()
                 for spec in grid:
-                    run_spec(ctx, spec)
+                    try:
+                        run_spec(ctx, spec)
+                    except Exception as e:                    # one failing run must not throw away hours of finished ones
+                        import traceback
+                        failures.append({"variant": variant, "seed": seed, "id": spec["id"], "error": repr(e),
+                                         "trace": traceback.format_exc()[-1500:]})
+                        log(f"  [{variant} s{seed}] {spec['id']} FAILED: {e!r}", fh)
+                        if device.type == "cuda":
+                            torch.cuda.empty_cache()
     json.dump({k: v for k, v in cfg.items()}, open(os.path.join(out_root, "config_used.json"), "w"), indent=1, default=str)
+    json.dump(failures, open(os.path.join(out_root, "failures.json"), "w"), indent=1)
+    if failures:
+        log(f"{len(failures)} runs FAILED (see failures.json); the report skips them", fh)
     return datasets

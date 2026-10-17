@@ -13,7 +13,12 @@
 
 % \num{key}: a number written by the experiment code (generated/numbers.tex). A missing key prints ??.
 \newcommand{\num}[1]{\ifcsname num@#1\endcsname\csname num@#1\endcsname\else\textbf{??}\fi}
+% \numif{key}{text}: print text only if the experiment code wrote the key (used for the optional second-machine replication)
+\newcommand{\numif}[2]{\ifcsname num@#1\endcsname #2\fi}
 \IfFileExists{generated/numbers.tex}{\input{generated/numbers.tex}}{}
+
+% \ci{tag}: the 95% interval of the paired difference d:<tag>, written [lo,hi] and breakable after the comma
+\newcommand{\ci}[1]{[\num{d:#1:lo},\allowbreak\num{d:#1:hi}]}
 
 % small helper for pm values in running text
 \newcommand{\pmv}[2]{$#1\pm#2$}

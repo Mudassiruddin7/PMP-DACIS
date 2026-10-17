@@ -10,10 +10,10 @@
   \node[base] (s0) {ImageNet\\ResNet-18};
   \node[train, right=0.30cm of s0] (ce) {S0: CE on\\base classes};
   \node[prune, right=0.30cm of ce] (p1) {P1: prune\\to 60\%};
-  \node[train, right=0.30cm of p1] (r1) {R: 1 epoch\\CE};
+  \node[train, right=0.30cm of p1] (r1) {R: recover\\with CE};
   \node[train, right=0.30cm of r1] (m) {M: 1000\\episodes};
   \node[prune, right=0.30cm of m] (p2) {P2: prune\\to budget};
-  \node[train, right=0.30cm of p2] (r2) {R: 1 epoch\\CE};
+  \node[train, right=0.30cm of p2] (r2) {R: recover\\with CE};
   \foreach \a/\b in {s0/ce, ce/p1, p1/r1, r1/m, m/p2, p2/r2} \draw[arr] (\a) -- (\b);
   \node[draw=red!60!black, dashed, rounded corners=1.5pt, align=center, inner sep=3.5pt, font=\scriptsize]
     (g) at ($(m)!0.5!(p2)+(0.95,-1.25)$) {$G_{\mathrm{meta}}$: mean filter-gradient\\norm of the episode loss};

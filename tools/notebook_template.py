@@ -30,7 +30,7 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # PMP-DACIS: one-click reproduction
+    # Channel pruning for few-shot Earth observation: one-click reproduction
 
     **What to do:** press *Run all*. Nothing else needs to be selected or typed.
     When the last cell finishes, click the **Results** button at the bottom; it downloads one zip with every
@@ -39,11 +39,13 @@ def _(mo):
     **What this notebook does, in order**
 
     1. Detects the GPU and picks the `paper` profile (a CPU-only machine gets a tiny `smoke` profile, which only checks that the code runs).
-    2. Downloads PlantVillage, PlantDoc and EuroSAT-MS from the Hugging Face Hub (about 4 GB).
-    3. Trains and evaluates every model of the study: ResNet-18, 5-way 1/5/10-shot episodes, three class splits (seeds).
-       Finished runs are cached on disk, so *Run all* can be repeated after an interruption and resumes where it stopped.
+    2. Downloads NWPU-RESISC45 (aerial scenes), EuroSAT-MS (Sentinel-2, 13 bands), PlantVillage and PlantDoc from the Hugging Face Hub (about 5 GB).
+    3. Trains and evaluates every model of the study: ResNet-18 pruned by eight channel scores under several schedules and budgets,
+       three off-the-shelf compact networks, 5-way 1/5/10-shot episodes on held-out classes, five class partitions (seeds).
+       On an RTX 6000-class GPU this takes about two hours. Finished runs are cached on disk, so *Run all* can be repeated
+       after an interruption and resumes where it stopped.
     4. Builds all tables and figures from the saved per-episode results. No number in the paper is typed by hand.
-    5. Compiles the anonymous review PDF and the author-version PDF with Tectonic.
+    5. Compiles the anonymous review PDF, the author-version PDF and the supplement with Tectonic.
     6. Packs everything into `results.zip`.
 
     Every accuracy in the paper comes from the files this notebook writes. If a statement in the text no longer
@@ -128,8 +130,8 @@ def _(CFG, D, PROFILE, WORK, os):
 
 @app.cell
 def _(CACHE, CFG, DATA, E, OUT, PROFILE, device, time):
-    VARIANTS = ("plantvillage", "eurosat13", "eurosat3")
-    TIERS = (1, 2, 3) if PROFILE == "paper" else (1,)
+    VARIANTS = ("resisc45", "eurosat13", "eurosat3", "plantvillage")
+    TIERS = (1, 2, 3) if PROFILE in ("paper", "micro") else (1,)
     _fh = open(OUT / "log.txt", "a")
     _t0 = time.time()
     E.log(f"starting runs: tiers {TIERS}, variants {VARIANTS}", _fh)
@@ -180,14 +182,16 @@ def _(mo):
 def _(R, mo):
     import pandas as pd
     _rows = []
-    for _vid, _lab in (("dense_ce", "Dense, CE only"), ("dense_m", "Dense + episodic"), ("A_l1_PMP_30", "Filter L1, PMP, 30% params"),
-                       ("A_taylor_PMP_30", "Taylor, PMP, 30% params"), ("A_dacis_PMP_30", "DACIS, PMP, 30% params")):
-        if R.has("plantvillage", _vid):
-            _cells = {}
-            for _k in ("novel_1", "novel_5", "novel_10", "plantdoc_5"):
-                _ms = R.ms("plantvillage", _vid, _k)
-                _cells[_k] = "--" if _ms is None else "%.1f ± %.1f" % _ms
-            _rows.append({"model": _lab, **_cells})
+    _cols = (("resisc45", "novel_5", "RESISC45 5-shot"), ("eurosat13", "novel_5", "EuroSAT-MS 5-shot"),
+             ("plantvillage", "novel_5", "PlantVillage 5-shot"), ("plantvillage", "plantdoc_5", "PlantDoc 5-shot"))
+    for _vid, _lab in (("dense_ce", "Dense ResNet-18"), ("dense_m", "Dense + episodic"), ("A_random_PMP_30", "Random, PMP, 30% params"),
+                       ("A_l1_PMP_30", "Filter L1, PMP, 30% params"), ("A_taylor_PMP_30", "Taylor, PMP, 30% params"),
+                       ("A_dacis_PMP_30", "DACIS, PMP, 30% params"), ("K_mobilenet_v3_small", "MobileNetV3-Small")):
+        _cells = {}
+        for _v, _k, _h in _cols:
+            _ms = R.ms(_v, _vid, _k) if R.has(_v, _vid) else None
+            _cells[_h] = "--" if _ms is None else "%.1f ± %.1f" % _ms
+        _rows.append({"model": _lab, **_cells})
     mo.ui.table(pd.DataFrame(_rows), selection=None) if _rows else mo.md("no results yet")
     return (pd,)
 

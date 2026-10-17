@@ -28,6 +28,7 @@ def clean(tex):
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8")
     out = []
     for p in sys.argv[1:]:
         out.append(clean(open(p, encoding="utf-8").read()))
