@@ -1,0 +1,8 @@
+\section{Limitations}
+\label{sec:limits}
+
+\num{plantvillage:seeds} class partitions are few. The spread over partitions in the tables mixes how hard a partition is with training noise, and it is itself estimated from five numbers. Every hyper-parameter, including $\lambda$, was fixed in advance and shared by all scores, and the only value we tuned (the episodic learning rate, on validation classes) was tuned on the dense network. A score that needs its own learning rate or recovery schedule did not get its best case.
+
+PlantVillage images are leaves on a plain background, and the dataset holds several photographs of the same leaf. We did not use leaf identities to keep support and query images apart, so near-duplicates can raise the PlantVillage numbers; the PlantDoc and EuroSAT-MS results do not depend on that. PlantDoc here is a cropped-leaf release with one dropped class, and its concepts overlap those of PlantVillage. EuroSAT-MS has ten classes and $64{\times}64$ patches, which allows a $5/5$ class split and nothing larger. No model uses coordinates, acquisition dates or any sensor beyond the thirteen optical bands, and none was tested on full scenes.
+
+Cost is reported as parameters, multiply-accumulates, and latency on one server CPU and one GPU. We did not run on a Raspberry Pi, a Jetson or an accelerator on board a satellite, and we measured no energy, so we say nothing about those devices. Only ResNet-18 and only the inner convolution of each residual block were pruned. Quantisation, distillation, architecture search and recent few-shot learners were not compared; the claims are limited to channel scores and training schedules inside this one design.
